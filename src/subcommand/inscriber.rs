@@ -101,9 +101,9 @@ impl Inscriber {
             }
           }
 
-          println!("target: {:?}", target);
+          // println!("target: {:?}", target);
           let inscription = Inscription::new(Some(INSCRIPTION_TYPE.into()), Some(content.into()));
-          println!("inscription: {:?}", inscription);
+          // println!("inscription: {:?}", inscription);
 
           let commit_tx_change = [
             get_change_address(&client, &options).unwrap(),
@@ -181,6 +181,10 @@ impl Inscriber {
 
           let reveal = reveal.unwrap();
 
+          println!("commit: {:?}", commit);
+          println!("reveal: {:?}", reveal);
+          println!("total_fees: {:?}", total_fees);
+
           // Ok(Box::new(Output {
           //   commit,
           //   reveal,
@@ -192,6 +196,11 @@ impl Inscriber {
           //   total_fees,
           // }))
         }
+
+        repository
+          .complete_payment(&id)
+          .await
+          .expect("should complete payment");
       }
 
       println!("inscribing inscriptions");
