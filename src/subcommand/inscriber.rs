@@ -1,3 +1,6 @@
+use bitcoin::PrivateKey;
+use bitcoincore_rpc::bitcoincore_rpc_json::{ImportDescriptors, Timestamp};
+
 use crate::{db::PaymentRepository, subcommand::wallet::get_change_address};
 
 use {
@@ -5,7 +8,6 @@ use {
   crate::{db::Repository, subcommand::wallet::transaction_builder::Target, wallet::Wallet},
   bitcoin::{
     blockdata::{opcodes, script},
-    key::PrivateKey,
     key::{TapTweak, TweakedKeyPair, TweakedPublicKey, UntweakedKeyPair},
     locktime::absolute::LockTime,
     policy::MAX_STANDARD_TX_WEIGHT,
@@ -15,8 +17,6 @@ use {
     taproot::{ControlBlock, LeafVersion, TapLeafHash, TaprootBuilder},
     ScriptBuf, Witness,
   },
-  bitcoincore_rpc::bitcoincore_rpc_json::{ImportDescriptors, SignRawTransactionInput, Timestamp},
-  bitcoincore_rpc::Client,
   std::collections::BTreeSet,
 };
 
@@ -91,6 +91,8 @@ impl Inscriber {
 
         let contents = res.unwrap();
 
+        let inscriptions = index.get_inscriptions(utxos.clone()).unwrap();
+
         for (target, content) in contents {
           if let Some(limit) = options.chain().inscription_content_size_limit() {
             if content.len() > limit {
@@ -123,6 +125,72 @@ impl Inscriber {
             continue;
           }
           let reveal_tx_destination = reveal_tx_destination.unwrap();
+
+          let postage: u64 = match &target {
+            s if s.starts_with("1") => 546,
+            s if s.starts_with("3") => 540,
+            s if s.starts_with("bc1p") => 330,
+            s if s.starts_with("bc1q") => 294,
+            _ => 546,
+          };
+
+          let (commit_tx, reveal_tx, recovery_key_pair, total_fees) =
+            Inscriber::create_inscription_transactions(
+              None,
+              None,
+              inscription,
+              inscriptions.clone(),
+              options.chain().network(),
+              utxos.clone(),
+              commit_tx_change,
+              reveal_tx_destination,
+              FeeRate::try_from(10f64).unwrap(),
+              FeeRate::try_from(10f64).unwrap(),
+              false,
+              false,
+              Amount::from_sat(postage),
+            )
+            .unwrap();
+
+          let signed_commit_tx = client
+            .sign_raw_transaction_with_wallet(&commit_tx, None, None)
+            .unwrap()
+            .hex;
+
+          let signed_reveal_tx = bitcoin::consensus::encode::serialize(&reveal_tx);
+          let commit = client.send_raw_transaction(&signed_commit_tx);
+
+          if commit.is_err() {
+            println!("error: {:?}", commit);
+            continue;
+          }
+
+          let commit = commit.unwrap();
+
+          Inscriber::backup_recovery_key(&client, recovery_key_pair, options.chain().network())
+            .unwrap();
+
+          let reveal = client
+            .send_raw_transaction(&signed_reveal_tx)
+            .context("Failed to send reveal transaction");
+
+          if reveal.is_err() {
+            println!("error: {:?}", reveal);
+            continue;
+          }
+
+          let reveal = reveal.unwrap();
+
+          // Ok(Box::new(Output {
+          //   commit,
+          //   reveal,
+          //   parent: self.parent,
+          //   inscription: InscriptionId {
+          //     txid: reveal,
+          //     index: 0,
+          //   },
+          //   total_fees,
+          // }))
         }
       }
 
@@ -138,135 +206,7 @@ impl Inscriber {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(self.inscriptions_inscriber(options));
 
-    // let inscription =
-    //   Inscription::from_file(options.chain(), &self.file, self.parent, self.metaprotocol)?;
-    //
-    // let index = Index::open(&options)?;
-    // index.update()?;
-    //
-    // let client = options.bitcoin_rpc_client_for_wallet_command(false)?;
-    //
-    // let utxos = index.get_unspent_outputs(Wallet::load(&options)?)?;
-    //
-    // let inscriptions = index.get_inscriptions(utxos.clone())?;
-    //
-    // let commit_tx_change = [
-    //   get_change_address(&client, &options)?,
-    //   get_change_address(&client, &options)?,
-    // ];
-    //
-    // let reveal_tx_destination = match self.destination {
-    //   Some(address) => address.require_network(options.chain().network())?,
-    //   None => get_change_address(&client, &options)?,
-    // };
-    //
-    // let parent_info = if let Some(parent_id) = self.parent {
-    //   if let Some(satpoint) = index.get_inscription_satpoint_by_id(parent_id)? {
-    //     if !utxos.contains_key(&satpoint.outpoint) {
-    //       return Err(anyhow!(format!("parent {parent_id} not in wallet")));
-    //     }
-    //
-    //     Some(ParentInfo {
-    //       destination: get_change_address(&client, &options)?,
-    //       location: satpoint,
-    //       tx_out: index
-    //         .get_transaction(satpoint.outpoint.txid)?
-    //         .expect("parent transaction not found in index")
-    //         .output
-    //         .into_iter()
-    //         .nth(satpoint.outpoint.vout.try_into().unwrap())
-    //         .expect("current transaction output"),
-    //     })
-    //   } else {
-    //     return Err(anyhow!(format!("parent {parent_id} does not exist")));
-    //   }
-    // } else {
-    //   None
-    // };
-    //
-    // let (commit_tx, reveal_tx, recovery_key_pair, total_fees) =
-    //   Inscribe::create_inscription_transactions(
-    //     self.satpoint,
-    //     parent_info,
-    //     inscription,
-    //     inscriptions,
-    //     options.chain().network(),
-    //     utxos,
-    //     commit_tx_change,
-    //     reveal_tx_destination,
-    //     self.commit_fee_rate.unwrap_or(self.fee_rate),
-    //     self.fee_rate,
-    //     self.no_limit,
-    //     self.reinscribe,
-    //     match self.postage {
-    //       Some(postage) => postage,
-    //       _ => TransactionBuilder::TARGET_POSTAGE,
-    //     },
-    //   )?;
-    //
-    // if self.dry_run {
-    //   return Ok(Box::new(Output {
-    //     commit: commit_tx.txid(),
-    //     reveal: reveal_tx.txid(),
-    //     inscription: InscriptionId {
-    //       txid: reveal_tx.txid(),
-    //       index: 0,
-    //     },
-    //     parent: self.parent,
-    //     total_fees,
-    //   }));
-    // }
-    //
-    // let signed_commit_tx = client
-    //   .sign_raw_transaction_with_wallet(&commit_tx, None, None)?
-    //   .hex;
-    //
-    // let signed_reveal_tx = if self.parent.is_some() {
-    //   client
-    //     .sign_raw_transaction_with_wallet(
-    //       &reveal_tx,
-    //       Some(
-    //         &commit_tx
-    //           .output
-    //           .iter()
-    //           .enumerate()
-    //           .map(|(vout, output)| SignRawTransactionInput {
-    //             txid: commit_tx.txid(),
-    //             vout: vout.try_into().unwrap(),
-    //             script_pub_key: output.script_pubkey.clone(),
-    //             redeem_script: None,
-    //             amount: Some(Amount::from_sat(output.value)),
-    //           })
-    //           .collect::<Vec<SignRawTransactionInput>>(),
-    //       ),
-    //       None,
-    //     )?
-    //     .hex
-    // } else {
-    //   bitcoin::consensus::encode::serialize(&reveal_tx)
-    // };
-    //
-    // if !self.no_backup {
-    //   Inscribe::backup_recovery_key(&client, recovery_key_pair, options.chain().network())?;
-    // }
-    //
-    // let commit = client.send_raw_transaction(&signed_commit_tx)?;
-    //
-    // let reveal = client
-    //   .send_raw_transaction(&signed_reveal_tx)
-    //   .context("Failed to send reveal transaction")?;
-    //
-    // Ok(Box::new(Output {
-    //   commit,
-    //   reveal,
-    //   parent: self.parent,
-    //   inscription: InscriptionId {
-    //     txid: reveal,
-    //     index: 0,
-    //   },
-    //   total_fees,
-    // }))
-    todo!();
+    Ok(Box::new(()))
   }
 
   fn create_inscription_transactions(

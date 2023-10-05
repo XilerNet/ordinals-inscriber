@@ -28,7 +28,7 @@ pub struct Output {
 }
 
 #[derive(Clone)]
-struct ParentInfo {
+pub struct ParentInfo {
   destination: Address,
   location: SatPoint,
   tx_out: TxOut,
@@ -203,7 +203,7 @@ impl Inscribe {
     }))
   }
 
-  fn create_inscription_transactions(
+  pub(crate) fn create_inscription_transactions(
     satpoint: Option<SatPoint>,
     parent_info: Option<ParentInfo>,
     inscription: Inscription,
