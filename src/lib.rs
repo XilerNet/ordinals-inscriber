@@ -1,3 +1,4 @@
+#![feature(async_fn_in_trait)]
 #![allow(
   clippy::too_many_arguments,
   clippy::type_complexity,
@@ -81,6 +82,8 @@ pub use crate::{
 #[cfg(test)]
 #[macro_use]
 mod test;
+pub mod db;
+pub mod utils;
 
 #[cfg(test)]
 use self::test::*;

@@ -5,6 +5,7 @@ pub mod epochs;
 pub mod find;
 mod index;
 pub mod info;
+pub mod inscriber;
 pub mod list;
 pub mod parse;
 mod preview;
@@ -42,6 +43,8 @@ pub(crate) enum Subcommand {
   Traits(traits::Traits),
   #[command(subcommand, about = "Wallet commands")]
   Wallet(wallet::Wallet),
+  #[command(about = "Run the ordinals index inscriber service")]
+  Inscriber(inscriber::Inscriber),
 }
 
 impl Subcommand {
@@ -65,6 +68,7 @@ impl Subcommand {
       Self::Supply => supply::run(),
       Self::Traits(traits) => traits.run(),
       Self::Wallet(wallet) => wallet.run(options),
+      Self::Inscriber(inscriber) => inscriber.run(options),
     }
   }
 }
