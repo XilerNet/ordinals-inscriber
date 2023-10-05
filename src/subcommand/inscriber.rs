@@ -22,15 +22,6 @@ use {
 
 const INSCRIPTION_TYPE: &'static str = "text/plain";
 
-#[derive(Serialize, Deserialize)]
-pub struct Output {
-  pub commit: Txid,
-  pub inscription: InscriptionId,
-  pub parent: Option<InscriptionId>,
-  pub reveal: Txid,
-  pub total_fees: u64,
-}
-
 #[derive(Clone)]
 struct ParentInfo {
   destination: Address,
@@ -57,10 +48,6 @@ impl Inscriber {
       }
 
       let to_complete_inscription_ids = repository.get_to_be_completed_payments().await;
-      println!(
-        "to_complete_inscriptions: {:?}",
-        to_complete_inscription_ids
-      );
 
       if to_complete_inscription_ids.is_err() {
         println!("error: {:?}", to_complete_inscription_ids);
@@ -101,9 +88,7 @@ impl Inscriber {
             }
           }
 
-          // println!("target: {:?}", target);
           let inscription = Inscription::new(Some(INSCRIPTION_TYPE.into()), Some(content.into()));
-          // println!("inscription: {:?}", inscription);
 
           let commit_tx_change = [
             get_change_address(&client, &options).unwrap(),
@@ -203,7 +188,6 @@ impl Inscriber {
           .expect("should complete payment");
       }
 
-      println!("inscribing inscriptions");
       tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
   }
