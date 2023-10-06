@@ -22,5 +22,13 @@ where
   async fn get_payment_inscriptions_content(
     &self,
     payment_id: &Uuid,
-  ) -> Result<Option<Vec<(String, String)>>, sqlx::Error>;
+  ) -> Result<Option<Vec<(Uuid, String, String)>>, sqlx::Error>;
+
+  async fn add_payment_inscription_details(
+    &self,
+    content_id: &Uuid,
+    commit: &str,
+    reveal: &str,
+    total_fees: f64,
+  ) -> Result<(), sqlx::Error>;
 }

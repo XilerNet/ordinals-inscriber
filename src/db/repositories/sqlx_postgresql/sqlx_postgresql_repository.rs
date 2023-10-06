@@ -111,14 +111,14 @@ impl PaymentRepository for SqlxPostgresqlRepository {
   async fn get_payment_inscriptions_content(
     &self,
     payment_id: &Uuid,
-  ) -> Result<Option<Vec<(String, String)>>, sqlx::Error> {
+  ) -> Result<Option<Vec<(Uuid, String, String)>>, sqlx::Error> {
     debug!(
       "[DB] Getting payment inscription contents for payment {}",
       payment_id
     );
 
     let res = sqlx::query!(
-      r#"SELECT target, content FROM payment_inscription_contents WHERE payment_id = $1;"#,
+      r#"SELECT id, target, content FROM payment_inscription_contents WHERE payment_id = $1;"#,
       payment_id
     )
     .fetch_all(&self.pool)
@@ -137,7 +137,7 @@ impl PaymentRepository for SqlxPostgresqlRepository {
     let mut contents = Vec::new();
 
     for row in res {
-      contents.push((row.target, row.content));
+      contents.push((row.id, row.target, row.content));
     }
 
     debug!(
@@ -146,5 +146,37 @@ impl PaymentRepository for SqlxPostgresqlRepository {
     );
 
     Ok(Some(contents))
+  }
+
+  async fn add_payment_inscription_details(
+    &self,
+    content_id: &Uuid,
+    commit: &str,
+    reveal: &str,
+    total_fees: f64,
+  ) -> Result<(), sqlx::Error> {
+    debug!("[DB] Adding inscription details for content {}", content_id);
+
+    let res = sqlx::query!(
+      r#"INSERT INTO payment_inscriptions (content, commit_tx, reveal_tx, total_fees) VALUES ($1, $2, $3, $4);"#,
+      content_id,
+      commit,
+      reveal,
+      total_fees
+    )
+    .execute(&self.pool)
+    .await;
+
+    if let Err(e) = res {
+      error!(
+        "[DB] Failed to add inscription details for content {}",
+        content_id
+      );
+      return Err(e);
+    }
+
+    debug!("[DB] Added inscription details for content {}", content_id);
+
+    Ok(())
   }
 }

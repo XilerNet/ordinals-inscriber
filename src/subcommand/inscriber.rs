@@ -1,5 +1,6 @@
 use bitcoin::PrivateKey;
 use bitcoincore_rpc::bitcoincore_rpc_json::{ImportDescriptors, Timestamp};
+use tracing::info;
 
 use crate::{db::PaymentRepository, subcommand::wallet::get_change_address};
 
@@ -56,11 +57,9 @@ impl Inscriber {
       }
 
       let to_complete_inscription_ids = to_complete_inscription_ids.unwrap();
-      let utxos = index
-        .get_unspent_outputs(Wallet::load(&options).unwrap())
-        .unwrap();
 
       for id in to_complete_inscription_ids {
+        info!("inscribing inscription: {:?}", id);
         println!("inscribing inscription: {:?}", id);
         let res = repository.get_payment_inscriptions_content(&id).await;
 
@@ -78,9 +77,17 @@ impl Inscriber {
 
         let contents = res.unwrap();
 
-        let inscriptions = index.get_inscriptions(utxos.clone()).unwrap();
+        for (id, target, content) in contents {
+          tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+          if let Err(err) = index.update() {
+            println!("error: {:?}", err);
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            continue;
+          }
 
-        for (target, content) in contents {
+          info!("inscribing inscription content: {:?}", id);
+          println!("inscribing inscription content: {:?}", id);
+
           if let Some(limit) = options.chain().inscription_content_size_limit() {
             if content.len() > limit {
               println!("content too large: {:?}: {:?}", id, target);
@@ -118,6 +125,11 @@ impl Inscriber {
             s if s.starts_with("bc1q") => 294,
             _ => 546,
           };
+
+          let utxos = index
+            .get_unspent_outputs(Wallet::load(&options).unwrap())
+            .unwrap();
+          let inscriptions = index.get_inscriptions(utxos.clone()).unwrap();
 
           let (commit_tx, reveal_tx, recovery_key_pair, total_fees) =
             Inscriber::create_inscription_transactions(
@@ -166,20 +178,19 @@ impl Inscriber {
 
           let reveal = reveal.unwrap();
 
-          println!("commit: {:?}", commit);
-          println!("reveal: {:?}", reveal);
-          println!("total_fees: {:?}", total_fees);
+          let res = repository
+            .add_payment_inscription_details(
+              &id,
+              &commit.to_raw_hash().to_string(),
+              &reveal.as_raw_hash().to_string(),
+              total_fees as f64,
+            )
+            .await;
 
-          // Ok(Box::new(Output {
-          //   commit,
-          //   reveal,
-          //   parent: self.parent,
-          //   inscription: InscriptionId {
-          //     txid: reveal,
-          //     index: 0,
-          //   },
-          //   total_fees,
-          // }))
+          if res.is_err() {
+            println!("error: {:?}", res);
+            continue;
+          }
         }
 
         repository
