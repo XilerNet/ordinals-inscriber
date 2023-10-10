@@ -58,7 +58,7 @@ impl Inscriber {
 
       let to_complete_inscription_ids = to_complete_inscription_ids.unwrap();
 
-      for id in to_complete_inscription_ids {
+      'to_complete: for id in to_complete_inscription_ids {
         info!("inscribing inscription: {:?}", id);
         println!("inscribing inscription: {:?}", id);
         let res = repository.get_payment_inscriptions_content(&id).await;
@@ -76,8 +76,13 @@ impl Inscriber {
         }
 
         let contents = res.unwrap();
+        let mut success = true;
 
-        for (id, target, content) in contents {
+        for (id, inscribed, target, content) in contents {
+          if inscribed {
+            continue;
+          }
+
           tokio::time::sleep(std::time::Duration::from_millis(1)).await;
           if let Err(err) = index.update() {
             println!("error: {:?}", err);
@@ -126,13 +131,24 @@ impl Inscriber {
             _ => 546,
           };
 
-          let utxos = index
-            .get_unspent_outputs(Wallet::load(&options).unwrap())
-            .unwrap();
-          let inscriptions = index.get_inscriptions(utxos.clone()).unwrap();
+          let utxos = index.get_unspent_outputs(Wallet::load(&options).unwrap());
 
-          let (commit_tx, reveal_tx, recovery_key_pair, total_fees) =
-            Inscriber::create_inscription_transactions(
+          if utxos.is_err() {
+            break 'to_complete;
+          }
+
+          let utxos = utxos.unwrap();
+
+          let inscriptions = index.get_inscriptions(utxos.clone());
+
+          if inscriptions.is_err() {
+            break 'to_complete;
+          }
+
+          let inscriptions = inscriptions.unwrap();
+
+          let (commit_tx, reveal_tx, recovery_key_pair, total_fees) = {
+            let res = Inscriber::create_inscription_transactions(
               None,
               None,
               inscription,
@@ -146,8 +162,15 @@ impl Inscriber {
               false,
               false,
               Amount::from_sat(postage),
-            )
-            .unwrap();
+            );
+
+            if res.is_err() {
+              success = false;
+              continue;
+            }
+
+            res.unwrap()
+          };
 
           let signed_commit_tx = client
             .sign_raw_transaction_with_wallet(&commit_tx, None, None)
@@ -179,6 +202,15 @@ impl Inscriber {
           let reveal = reveal.unwrap();
 
           let res = repository
+            .mark_payment_inscription_content_as_inscribed(&id)
+            .await;
+
+          if res.is_err() {
+            println!("error: {:?}", res);
+            continue;
+          }
+
+          let res = repository
             .add_payment_inscription_details(
               &id,
               &commit.to_raw_hash().to_string(),
@@ -193,10 +225,12 @@ impl Inscriber {
           }
         }
 
-        repository
-          .complete_payment(&id)
-          .await
-          .expect("should complete payment");
+        if success {
+          repository
+            .complete_payment(&id)
+            .await
+            .expect("should complete payment");
+        }
       }
 
       tokio::time::sleep(std::time::Duration::from_secs(1)).await;

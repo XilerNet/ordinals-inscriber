@@ -86,7 +86,7 @@ impl PaymentRepository for SqlxPostgresqlRepository {
   async fn get_to_be_completed_payments(&self) -> Result<Vec<Uuid>, sqlx::Error> {
     debug!("[DB] Getting to be completed payments");
 
-    let res = sqlx::query!( r#"SELECT id FROM payments WHERE initiated = TRUE AND completed = FALSE AND received >= amount"#)
+    let res = sqlx::query!( r#"SELECT id FROM payments WHERE initiated = TRUE AND completed = FALSE AND received >= amount ORDER BY updated_at ASC;"#)
         .fetch_all(&self.pool)
         .await;
 
@@ -111,14 +111,14 @@ impl PaymentRepository for SqlxPostgresqlRepository {
   async fn get_payment_inscriptions_content(
     &self,
     payment_id: &Uuid,
-  ) -> Result<Option<Vec<(Uuid, String, String)>>, sqlx::Error> {
+  ) -> Result<Option<Vec<(Uuid, bool, String, String)>>, sqlx::Error> {
     debug!(
       "[DB] Getting payment inscription contents for payment {}",
       payment_id
     );
 
     let res = sqlx::query!(
-      r#"SELECT id, target, content FROM payment_inscription_contents WHERE payment_id = $1;"#,
+      r#"SELECT id, inscribed, target, content FROM payment_inscription_contents WHERE payment_id = $1;"#,
       payment_id
     )
     .fetch_all(&self.pool)
@@ -137,7 +137,7 @@ impl PaymentRepository for SqlxPostgresqlRepository {
     let mut contents = Vec::new();
 
     for row in res {
-      contents.push((row.id, row.target, row.content));
+      contents.push((row.id, row.inscribed, row.target, row.content));
     }
 
     debug!(
@@ -176,6 +176,38 @@ impl PaymentRepository for SqlxPostgresqlRepository {
     }
 
     debug!("[DB] Added inscription details for content {}", content_id);
+
+    Ok(())
+  }
+
+  async fn mark_payment_inscription_content_as_inscribed(
+    &self,
+    content_id: &Uuid,
+  ) -> Result<(), sqlx::Error> {
+    debug!(
+      "[DB] Marking payment inscription content {} as inscribed",
+      content_id
+    );
+
+    let res = sqlx::query!(
+      r#"UPDATE payment_inscription_contents SET inscribed = TRUE WHERE id = $1;"#,
+      content_id
+    )
+    .execute(&self.pool)
+    .await;
+
+    if let Err(e) = res {
+      error!(
+        "[DB] Failed to mark payment inscription content {} as inscribed",
+        content_id
+      );
+      return Err(e);
+    }
+
+    debug!(
+      "[DB] Marked payment inscription content {} as inscribed",
+      content_id
+    );
 
     Ok(())
   }
