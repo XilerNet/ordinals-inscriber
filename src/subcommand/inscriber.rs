@@ -34,8 +34,200 @@ struct ParentInfo {
 pub(crate) struct Inscriber {}
 
 impl Inscriber {
-  async fn inscriptions_inscriber(self, options: Options) {
-    let repository = Repository::new().await;
+  async fn inscriber_wrapper(
+    &self,
+    options: Options,
+    index: &Index,
+    repository: &Repository,
+    client: &Client,
+  ) {
+    let to_complete_inscription_ids = repository.get_to_be_completed_payments().await;
+
+    if to_complete_inscription_ids.is_err() {
+      println!("error: {:?}", to_complete_inscription_ids);
+      return;
+    }
+
+    let to_complete_inscription_ids = to_complete_inscription_ids.unwrap();
+
+    'to_complete: for id in to_complete_inscription_ids {
+      info!("inscribing payment contents: {:?}", id);
+      let res = repository.get_payment_inscriptions_content(&id).await;
+
+      if res.is_err() {
+        println!("error: {:?}", res);
+        continue;
+      }
+
+      let res = res.unwrap();
+
+      if res.is_none() {
+        println!("error: {:?}", res);
+        continue;
+      }
+
+      let contents = res.unwrap();
+      let mut success = true;
+
+      for (id, inscribed, target, content) in contents {
+        if inscribed {
+          continue;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        if let Err(err) = index.update() {
+          println!("error: {:?}", err);
+          tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+          continue;
+        }
+
+        info!("inscribing inscription content: {:?}", id);
+
+        if let Some(limit) = options.chain().inscription_content_size_limit() {
+          if content.len() > limit {
+            println!("content too large: {:?}: {:?}", id, target);
+            continue;
+          }
+        }
+
+        let inscription = Inscription::new(Some(INSCRIPTION_TYPE.into()), Some(content.into()));
+
+        let commit_tx_change = [
+          get_change_address(&client, &options).unwrap(),
+          get_change_address(&client, &options).unwrap(),
+        ];
+
+        let destination = Address::<NetworkUnchecked>::from_str(&target);
+        if destination.is_err() {
+          println!("error: {:?}", destination);
+          continue;
+        }
+
+        let reveal_tx_destination = destination
+          .unwrap()
+          .require_network(options.chain().network());
+
+        if reveal_tx_destination.is_err() {
+          println!("error: {:?}", reveal_tx_destination);
+          continue;
+        }
+        let reveal_tx_destination = reveal_tx_destination.unwrap();
+
+        let postage: u64 = match &target {
+          s if s.starts_with("1") => 546,
+          s if s.starts_with("3") => 540,
+          s if s.starts_with("bc1p") => 330,
+          s if s.starts_with("bc1q") => 294,
+          _ => 546,
+        };
+
+        let utxos = index.get_unspent_outputs(Wallet::load(&options).unwrap());
+
+        if utxos.is_err() {
+          break 'to_complete;
+        }
+
+        let utxos = utxos.unwrap();
+
+        let inscriptions = index.get_inscriptions(utxos.clone());
+
+        if inscriptions.is_err() {
+          break 'to_complete;
+        }
+
+        let inscriptions = inscriptions.unwrap();
+
+        let (commit_tx, reveal_tx, recovery_key_pair, total_fees) = {
+          let res = Inscriber::create_inscription_transactions(
+            None,
+            None,
+            inscription,
+            inscriptions.clone(),
+            options.chain().network(),
+            utxos.clone(),
+            commit_tx_change,
+            reveal_tx_destination,
+            FeeRate::try_from(10f64).unwrap(),
+            FeeRate::try_from(10f64).unwrap(),
+            false,
+            false,
+            Amount::from_sat(postage),
+          );
+
+          if res.is_err() {
+            success = false;
+            continue;
+          }
+
+          res.unwrap()
+        };
+
+        let signed_commit_tx = client
+          .sign_raw_transaction_with_wallet(&commit_tx, None, None)
+          .unwrap()
+          .hex;
+
+        let signed_reveal_tx = bitcoin::consensus::encode::serialize(&reveal_tx);
+        let commit = client.send_raw_transaction(&signed_commit_tx);
+
+        if commit.is_err() {
+          println!("error: {:?}", commit);
+          continue;
+        }
+
+        let commit = commit.unwrap();
+
+        Inscriber::backup_recovery_key(&client, recovery_key_pair, options.chain().network())
+          .unwrap();
+
+        let reveal = client
+          .send_raw_transaction(&signed_reveal_tx)
+          .context("Failed to send reveal transaction");
+
+        if reveal.is_err() {
+          println!("error: {:?}", reveal);
+          continue;
+        }
+
+        let reveal = reveal.unwrap();
+
+        let res = repository
+          .mark_payment_inscription_content_as_inscribed(&id)
+          .await;
+
+        if res.is_err() {
+          println!("error: {:?}", res);
+          continue;
+        }
+
+        let res = repository
+          .add_payment_inscription_details(
+            &id,
+            &commit.to_raw_hash().to_string(),
+            &reveal.as_raw_hash().to_string(),
+            total_fees as f64,
+          )
+          .await;
+
+        if res.is_err() {
+          println!("error: {:?}", res);
+          continue;
+        }
+      }
+
+      if success {
+        repository
+          .complete_payment(&id)
+          .await
+          .expect("should complete payment");
+      }
+    }
+  }
+
+  fn inscriber_starter(self, options: Options) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let repository = rt.block_on(Repository::new());
+
     let index = Index::open(&options).unwrap();
     let client = options
       .bitcoin_rpc_client_for_wallet_command(false)
@@ -44,196 +236,13 @@ impl Inscriber {
     loop {
       if let Err(err) = index.update() {
         println!("error: {:?}", err);
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        thread::sleep(std::time::Duration::from_secs(1));
         continue;
       }
 
-      let to_complete_inscription_ids = repository.get_to_be_completed_payments().await;
-
-      if to_complete_inscription_ids.is_err() {
-        println!("error: {:?}", to_complete_inscription_ids);
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        continue;
-      }
-
-      let to_complete_inscription_ids = to_complete_inscription_ids.unwrap();
-
-      'to_complete: for id in to_complete_inscription_ids {
-        info!("inscribing inscription: {:?}", id);
-        println!("inscribing inscription: {:?}", id);
-        let res = repository.get_payment_inscriptions_content(&id).await;
-
-        if res.is_err() {
-          println!("error: {:?}", res);
-          continue;
-        }
-
-        let res = res.unwrap();
-
-        if res.is_none() {
-          println!("error: {:?}", res);
-          continue;
-        }
-
-        let contents = res.unwrap();
-        let mut success = true;
-
-        for (id, inscribed, target, content) in contents {
-          if inscribed {
-            continue;
-          }
-
-          tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-          if let Err(err) = index.update() {
-            println!("error: {:?}", err);
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            continue;
-          }
-
-          info!("inscribing inscription content: {:?}", id);
-          println!("inscribing inscription content: {:?}", id);
-
-          if let Some(limit) = options.chain().inscription_content_size_limit() {
-            if content.len() > limit {
-              println!("content too large: {:?}: {:?}", id, target);
-              continue;
-            }
-          }
-
-          let inscription = Inscription::new(Some(INSCRIPTION_TYPE.into()), Some(content.into()));
-
-          let commit_tx_change = [
-            get_change_address(&client, &options).unwrap(),
-            get_change_address(&client, &options).unwrap(),
-          ];
-
-          let destination = Address::<NetworkUnchecked>::from_str(&target);
-          if destination.is_err() {
-            println!("error: {:?}", destination);
-            continue;
-          }
-
-          let reveal_tx_destination = destination
-            .unwrap()
-            .require_network(options.chain().network());
-
-          if reveal_tx_destination.is_err() {
-            println!("error: {:?}", reveal_tx_destination);
-            continue;
-          }
-          let reveal_tx_destination = reveal_tx_destination.unwrap();
-
-          let postage: u64 = match &target {
-            s if s.starts_with("1") => 546,
-            s if s.starts_with("3") => 540,
-            s if s.starts_with("bc1p") => 330,
-            s if s.starts_with("bc1q") => 294,
-            _ => 546,
-          };
-
-          let utxos = index.get_unspent_outputs(Wallet::load(&options).unwrap());
-
-          if utxos.is_err() {
-            break 'to_complete;
-          }
-
-          let utxos = utxos.unwrap();
-
-          let inscriptions = index.get_inscriptions(utxos.clone());
-
-          if inscriptions.is_err() {
-            break 'to_complete;
-          }
-
-          let inscriptions = inscriptions.unwrap();
-
-          let (commit_tx, reveal_tx, recovery_key_pair, total_fees) = {
-            let res = Inscriber::create_inscription_transactions(
-              None,
-              None,
-              inscription,
-              inscriptions.clone(),
-              options.chain().network(),
-              utxos.clone(),
-              commit_tx_change,
-              reveal_tx_destination,
-              FeeRate::try_from(10f64).unwrap(),
-              FeeRate::try_from(10f64).unwrap(),
-              false,
-              false,
-              Amount::from_sat(postage),
-            );
-
-            if res.is_err() {
-              success = false;
-              continue;
-            }
-
-            res.unwrap()
-          };
-
-          let signed_commit_tx = client
-            .sign_raw_transaction_with_wallet(&commit_tx, None, None)
-            .unwrap()
-            .hex;
-
-          let signed_reveal_tx = bitcoin::consensus::encode::serialize(&reveal_tx);
-          let commit = client.send_raw_transaction(&signed_commit_tx);
-
-          if commit.is_err() {
-            println!("error: {:?}", commit);
-            continue;
-          }
-
-          let commit = commit.unwrap();
-
-          Inscriber::backup_recovery_key(&client, recovery_key_pair, options.chain().network())
-            .unwrap();
-
-          let reveal = client
-            .send_raw_transaction(&signed_reveal_tx)
-            .context("Failed to send reveal transaction");
-
-          if reveal.is_err() {
-            println!("error: {:?}", reveal);
-            continue;
-          }
-
-          let reveal = reveal.unwrap();
-
-          let res = repository
-            .mark_payment_inscription_content_as_inscribed(&id)
-            .await;
-
-          if res.is_err() {
-            println!("error: {:?}", res);
-            continue;
-          }
-
-          let res = repository
-            .add_payment_inscription_details(
-              &id,
-              &commit.to_raw_hash().to_string(),
-              &reveal.as_raw_hash().to_string(),
-              total_fees as f64,
-            )
-            .await;
-
-          if res.is_err() {
-            println!("error: {:?}", res);
-            continue;
-          }
-        }
-
-        if success {
-          repository
-            .complete_payment(&id)
-            .await
-            .expect("should complete payment");
-        }
-      }
-
-      tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+      let inscriber_wrapper = self.inscriber_wrapper(options.clone(), &index, &repository, &client);
+      rt.block_on(inscriber_wrapper);
+      thread::sleep(std::time::Duration::from_secs(1));
     }
   }
 
@@ -241,8 +250,7 @@ impl Inscriber {
     color_eyre::install().ok();
     dotenv::dotenv().ok();
 
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(self.inscriptions_inscriber(options));
+    self.inscriber_starter(options);
 
     Ok(Box::new(()))
   }
